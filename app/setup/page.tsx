@@ -1,230 +1,220 @@
-// app/setup/page.tsx
+// app/page.tsx
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { getCurrentUser, getSettingsByUserId, saveSettings } from '@/lib/storage'
-import { buildSchedule, calcIntervalMinutes, getActiveMinutes } from '@/lib/scheduler'
-import { setupDailyNotifications } from '@/lib/notifications'
-import { WaterSettings } from '@/types'
+import {
+  getCurrentUser,
+  getSettingsByUserId,
+  getTodayProgress,
+  getSavedNotifications,
+} from '@/lib/storage'
+import { restoreScheduledNotifications, showToast } from '@/lib/notifications'
+import { getNextReminder, minutesUntilNext } from '@/lib/scheduler'
+import { logout } from '@/lib/storage'
+import WaterProgress from '@/components/WaterProgress'
+import DrinkButton from '@/components/DrinkButton'
+import ReminderSchedule from '@/components/ReminderSchedule'
+import Toast from '@/components/Toast'
+import { DailyProgress, NotificationPayload, User, WaterSettings } from '@/types'
 
-const PRESET_GOALS = [1500, 2000, 2500, 3000]
-const PRESET_AMOUNTS = [150, 200, 250, 300]
-
-export default function SetupPage() {
+export default function Dashboard() {
   const router = useRouter()
-  const [loading, setLoading] = useState(false)
-  const [saved, setSaved] = useState(false)
 
-  const [form, setForm] = useState({
-    dailyGoalMl: 2000,
-    wakeTime: '07:00',
-    sleepTime: '23:00',
-    amountPerDrinkMl: 250,
-  })
+  const [user, setUser] = useState<User | null>(null)
+  const [settings, setSettings] = useState<WaterSettings | null>(null)
+  const [progress, setProgress] = useState<DailyProgress | null>(null)
+  const [schedule, setSchedule] = useState<NotificationPayload[]>([])
+  const [nextReminder, setNextReminder] = useState<NotificationPayload | null>(null)
+  const [minutesLeft, setMinutesLeft] = useState<number>(0)
+  const [ready, setReady] = useState(false)
 
-  // Mevcut ayarları yükle (düzenleme modu)
+  // ── İlk yükleme ────────────────────────────────────────────────────────────
   useEffect(() => {
-    const user = getCurrentUser()
-    if (!user) { router.push('/login'); return }
+    const u = getCurrentUser()
+    if (!u) { router.push('/login'); return }
 
-    const existing = getSettingsByUserId(user.id)
-    if (existing) {
-      setForm({
-        dailyGoalMl: existing.dailyGoalMl,
-        wakeTime: existing.wakeTime,
-        sleepTime: existing.sleepTime,
-        amountPerDrinkMl: existing.amountPerDrinkMl,
-      })
-      setSaved(true)
-    }
+    const s = getSettingsByUserId(u.id)
+    if (!s) { router.push('/setup'); return }
+
+    const p = getTodayProgress(u.id)
+    const saved = getSavedNotifications()
+
+    setUser(u)
+    setSettings(s)
+    setProgress(p)
+    setSchedule(saved)
+    setNextReminder(getNextReminder(saved))
+    setMinutesLeft(saved.length ? minutesUntilNext(getNextReminder(saved)!) : 0)
+
+    restoreScheduledNotifications()
+    setReady(true)
   }, [router])
 
-  // Önizleme hesapla
-  const previewSettings: WaterSettings = {
-    userId: '',
-    ...form,
-    intervalMinutes: 0,
+  // ── Geri sayım (her dakika güncelle) ───────────────────────────────────────
+  useEffect(() => {
+    if (!nextReminder) return
+    const tick = setInterval(() => {
+      setMinutesLeft(minutesUntilNext(nextReminder))
+    }, 60000)
+    return () => clearInterval(tick)
+  }, [nextReminder])
+
+  // ── Su içilince progress güncelle ──────────────────────────────────────────
+  function handleDrink(newProgress: DailyProgress) {
+    setProgress(newProgress)
   }
-  const interval = calcIntervalMinutes(previewSettings)
-  const activeHours = Math.floor(getActiveMinutes(previewSettings) / 60)
-  const activeMin = getActiveMinutes(previewSettings) % 60
-  const drinksNeeded = Math.ceil(form.dailyGoalMl / form.amountPerDrinkMl)
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setLoading(true)
-
-    const user = getCurrentUser()
-    if (!user) { router.push('/login'); return }
-
-    const settings: WaterSettings = {
-      userId: user.id,
-      ...form,
-      intervalMinutes: interval,
-    }
-
-    saveSettings(settings)
-
-    const schedule = buildSchedule(settings)
-    await setupDailyNotifications(schedule)
-
-    setLoading(false)
-    router.push('/')
+  // ── Çıkış ──────────────────────────────────────────────────────────────────
+  function handleLogout() {
+    logout()
+    router.push('/login')
   }
+
+  if (!ready) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-sky-50 to-blue-50">
+        <div className="text-blue-400 text-4xl animate-bounce">💧</div>
+      </div>
+    )
+  }
+
+  const consumed = progress?.totalConsumedMl ?? 0
+  const goal = settings?.dailyGoalMl ?? 2000
+  const consumedCount = progress?.reminders.filter((r) => !r.skipped).length ?? 0
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-sky-50 via-white to-blue-50 px-4 py-10">
-      <div className="max-w-lg mx-auto">
+    <main className="min-h-screen bg-gradient-to-br from-sky-50 via-white to-blue-50">
+      <Toast />
 
-        {/* Başlık */}
-        <div className="text-center mb-8">
-          <div className="text-5xl mb-3">⚙️</div>
-          <h1 className="text-2xl font-bold text-slate-800">
-            {saved ? 'Ayarlarını Güncelle' : 'Hedefini Belirle'}
-          </h1>
-          <p className="text-slate-500 text-sm mt-1">
-            Uyku düzenine göre hatırlatıcılar otomatik ayarlanır
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b border-slate-100 px-4 py-3">
+        <div className="max-w-lg mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-2xl">💧</span>
+            <div>
+              <div className="text-sm font-bold text-slate-800 leading-tight">
+                Merhaba, {user?.name?.split(' ')[0]}!
+              </div>
+              <div className="text-xs text-slate-400">
+                {new Date().toLocaleDateString('tr-TR', {
+                  weekday: 'long',
+                  day: 'numeric',
+                  month: 'long',
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => router.push('/setup')}
+              className="text-xs px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 transition"
+            >
+              ⚙️ Ayarlar
+            </button>
+            <button
+              onClick={handleLogout}
+              className="text-xs px-3 py-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-500 transition"
+            >
+              Çıkış
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* ── İçerik ─────────────────────────────────────────────────────────── */}
+      <div className="max-w-lg mx-auto px-4 py-6 space-y-5">
+
+        {/* Sonraki hatırlatıcı banner */}
+        {nextReminder && (
+          <div className="bg-blue-600 text-white rounded-2xl px-5 py-4 flex items-center justify-between shadow-lg shadow-blue-200">
+            <div>
+              <div className="text-xs opacity-75 mb-0.5">Sonraki hatırlatıcı</div>
+              <div className="font-bold text-lg">
+                {new Date(nextReminder.scheduledAt).toLocaleTimeString('tr-TR', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-2xl font-black">{minutesLeft}dk</div>
+              <div className="text-xs opacity-75">sonra</div>
+            </div>
+          </div>
+        )}
+
+        {/* İlerleme */}
+        <WaterProgress consumed={consumed} goal={goal} />
+
+        {/* Su iç butonu */}
+        <div className="bg-white rounded-2xl shadow-sm shadow-blue-100 p-8 flex flex-col items-center gap-2">
+          <p className="text-sm text-slate-500 mb-2">
+            Her içişte{' '}
+            <span className="font-semibold text-blue-600">
+              {settings?.amountPerDrinkMl}ml
+            </span>{' '}
+            sayılır
           </p>
+          <DrinkButton onDrink={handleDrink} />
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
-
-          {/* Günlük Su Hedefi */}
-          <div className="bg-white rounded-2xl shadow-sm shadow-blue-100 p-6">
-            <h2 className="font-semibold text-slate-700 mb-4">
-              💧 Günlük Su Hedefi
-            </h2>
-
-            {/* Preset butonlar */}
-            <div className="grid grid-cols-4 gap-2 mb-4">
-              {PRESET_GOALS.map((g) => (
-                <button
-                  key={g}
-                  type="button"
-                  onClick={() => setForm((p) => ({ ...p, dailyGoalMl: g }))}
-                  className={`py-2 rounded-xl text-sm font-medium transition-all ${
-                    form.dailyGoalMl === g
-                      ? 'bg-blue-600 text-white shadow-md shadow-blue-200'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  }`}
-                >
-                  {g}ml
-                </button>
-              ))}
+        {/* Günlük istatistik */}
+        <div className="grid grid-cols-3 gap-3">
+          {[
+            {
+              label: 'İçiş',
+              value: consumedCount,
+              unit: 'kez',
+              color: 'text-blue-600',
+            },
+            {
+              label: 'Hedef',
+              value: `%${Math.min(Math.round((consumed / goal) * 100), 100)}`,
+              unit: '',
+              color: consumed >= goal ? 'text-green-600' : 'text-amber-500',
+            },
+            {
+              label: 'Kalan',
+              value: Math.max(goal - consumed, 0),
+              unit: 'ml',
+              color: 'text-slate-600',
+            },
+          ].map((stat) => (
+            <div
+              key={stat.label}
+              className="bg-white rounded-2xl shadow-sm shadow-blue-100 p-4 text-center"
+            >
+              <div className={`text-xl font-black ${stat.color}`}>
+                {stat.value}
+                <span className="text-xs font-normal ml-0.5">{stat.unit}</span>
+              </div>
+              <div className="text-xs text-slate-400 mt-1">{stat.label}</div>
             </div>
+          ))}
+        </div>
 
-            {/* Manuel giriş */}
-            <div className="flex items-center gap-3">
-              <input
-                type="range"
-                min={500}
-                max={4000}
-                step={100}
-                value={form.dailyGoalMl}
-                onChange={(e) =>
-                  setForm((p) => ({ ...p, dailyGoalMl: Number(e.target.value) }))
-                }
-                className="flex-1 accent-blue-600"
-              />
-              <span className="text-blue-700 font-bold w-20 text-right">
-                {form.dailyGoalMl} ml
-              </span>
-            </div>
+        {/* Program listesi */}
+        <ReminderSchedule schedule={schedule} consumedCount={consumedCount} />
+
+        {/* Motivasyon kartı */}
+        <div className="bg-gradient-to-r from-blue-50 to-sky-50 border border-blue-100 rounded-2xl p-5 text-center">
+          <div className="text-2xl mb-1">
+            {consumed >= goal
+              ? '🏆'
+              : consumed >= goal * 0.5
+              ? '💪'
+              : '🌊'}
           </div>
-
-          {/* Her İçişte Ne Kadar */}
-          <div className="bg-white rounded-2xl shadow-sm shadow-blue-100 p-6">
-            <h2 className="font-semibold text-slate-700 mb-4">
-              🥤 Her İçişte Ne Kadar?
-            </h2>
-            <div className="grid grid-cols-4 gap-2">
-              {PRESET_AMOUNTS.map((a) => (
-                <button
-                  key={a}
-                  type="button"
-                  onClick={() => setForm((p) => ({ ...p, amountPerDrinkMl: a }))}
-                  className={`py-2 rounded-xl text-sm font-medium transition-all ${
-                    form.amountPerDrinkMl === a
-                      ? 'bg-blue-600 text-white shadow-md shadow-blue-200'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  }`}
-                >
-                  {a}ml
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Uyku Düzeni */}
-          <div className="bg-white rounded-2xl shadow-sm shadow-blue-100 p-6">
-            <h2 className="font-semibold text-slate-700 mb-4">
-              🌙 Uyku Düzenin
-            </h2>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs text-slate-500 mb-1 font-medium">
-                  Uyanma Saati
-                </label>
-                <input
-                  type="time"
-                  value={form.wakeTime}
-                  onChange={(e) =>
-                    setForm((p) => ({ ...p, wakeTime: e.target.value }))
-                  }
-                  className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-400 text-slate-800 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-slate-500 mb-1 font-medium">
-                  Uyku Saati
-                </label>
-                <input
-                  type="time"
-                  value={form.sleepTime}
-                  onChange={(e) =>
-                    setForm((p) => ({ ...p, sleepTime: e.target.value }))
-                  }
-                  className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-400 text-slate-800 text-sm"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Canlı Önizleme */}
-          <div className="bg-blue-600 rounded-2xl p-6 text-white">
-            <h2 className="font-semibold mb-4 opacity-90">📊 Günlük Program Özeti</h2>
-            <div className="grid grid-cols-3 gap-4 text-center">
-              <div>
-                <div className="text-2xl font-bold">{drinksNeeded}</div>
-                <div className="text-xs opacity-75 mt-1">içiş / gün</div>
-              </div>
-              <div>
-                <div className="text-2xl font-bold">{interval}dk</div>
-                <div className="text-xs opacity-75 mt-1">aralık</div>
-              </div>
-              <div>
-                <div className="text-2xl font-bold">
-                  {activeHours}s {activeMin}dk
-                </div>
-                <div className="text-xs opacity-75 mt-1">aktif süre</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Kaydet */}
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-4 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-base transition-all shadow-lg shadow-blue-200 disabled:opacity-60"
-          >
-            {loading
-              ? '⏳ Kuruluyor...'
-              : saved
-              ? '✅ Güncelle & Bildirimleri Yeniden Kur'
-              : '🚀 Başlat & Bildirimleri Kur'}
-          </button>
-        </form>
+          <p className="text-sm text-slate-600 font-medium">
+            {consumed >= goal
+              ? 'Mükemmel! Bugün hedefine ulaştın!'
+              : consumed >= goal * 0.5
+              ? 'Yarıyı geçtin, devam et!'
+              : 'Her damla önemli, başla!'}
+          </p>
+        </div>
       </div>
     </main>
   )
