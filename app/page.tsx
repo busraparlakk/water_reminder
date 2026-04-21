@@ -1,264 +1,272 @@
-﻿// app/setup/page.tsx
+/* eslint-disable */
 'use client'
 
-import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { getCurrentUser, getSettingsByUserId, saveSettings } from '@/lib/storage'
-import { buildSchedule, calcIntervalMinutes, getActiveMinutes } from '@/lib/scheduler'
-import { setupDailyNotifications } from '@/lib/notifications'
-import { WaterSettings } from '@/types'
+import { getCurrentUser, getSettingsByUserId, getTodayProgress, getSavedNotifications, logout } from '@/lib/storage'
+import { restoreScheduledNotifications } from '@/lib/notifications'
+import { getNextReminder, minutesUntilNext } from '@/lib/scheduler'
+import WaterProgress from '@/components/WaterProgress'
+import DrinkButton from '@/components/DrinkButton'
+import ReminderSchedule from '@/components/ReminderSchedule'
+import Toast from '@/components/Toast'
+import type { DailyProgress, NotificationPayload, User, WaterSettings } from '@/types'
+import { useState, useEffect } from 'react'
 
-const PRESET_GOALS   = [1500, 2000, 2500, 3000]
-const PRESET_AMOUNTS = [150, 200, 250, 300]
-
-export default function SetupPage() {
+export default function Dashboard() {
   const router = useRouter()
-  const [loading, setLoading] = useState(false)
-  const [saved,   setSaved]   = useState(false)
-  const [mounted, setMounted] = useState(false)
-
-  const [form, setForm] = useState({
-    dailyGoalMl:      2000,
-    wakeTime:         '07:00',
-    sleepTime:        '23:00',
-    amountPerDrinkMl: 250,
-  })
+  const [ready, setReady] = useState(false)
+  const [redirectTo, setRedirectTo] = useState<string | null>(null)
+  const [user, setUser] = useState<User | null>(null)
+  const [settings, setSettings] = useState<WaterSettings | null>(null)
+  const [progress, setProgress] = useState<DailyProgress | null>(null)
+  const [schedule, setSchedule] = useState<NotificationPayload[]>([])
+  const [nextReminder, setNextReminder] = useState<NotificationPayload | null>(null)
+  const [minutesLeft, setMinutesLeft] = useState(0)
 
   useEffect(() => {
-    setMounted(true)
-    const user = getCurrentUser()
-    if (!user) { router.push('/login'); return }
-    const existing = getSettingsByUserId(user.id)
-    if (existing) {
-      setForm({
-        dailyGoalMl:      existing.dailyGoalMl,
-        wakeTime:         existing.wakeTime,
-        sleepTime:        existing.sleepTime,
-        amountPerDrinkMl: existing.amountPerDrinkMl,
-      })
-      setSaved(true)
-    }
-  }, [router])
+    const u = getCurrentUser()
+    if (!u) { setRedirectTo('/login'); return }
 
-  const previewSettings: WaterSettings = {
-    userId: '', ...form, intervalMinutes: 0,
+    const s = getSettingsByUserId(u.id)
+    if (!s) { setRedirectTo('/setup'); return }
+
+    const p     = getTodayProgress(u.id)
+    const saved = getSavedNotifications()
+    const next  = getNextReminder(saved)
+
+    setUser(u)
+    setSettings(s)
+    setProgress(p)
+    setSchedule(saved)
+    setNextReminder(next)
+    setMinutesLeft(next ? minutesUntilNext(next) : 0)
+    restoreScheduledNotifications()
+    setReady(true)
+  }, []) // eslint-disable-line
+
+  useEffect(() => {
+    if (redirectTo) router.push(redirectTo)
+  }, [redirectTo]) // eslint-disable-line
+
+  useEffect(() => {
+    if (!nextReminder) return
+    const tick = setInterval(() => {
+      setMinutesLeft(minutesUntilNext(nextReminder))
+    }, 60000)
+    return () => clearInterval(tick)
+  }, [nextReminder])
+
+  function handleDrink(newProgress: DailyProgress) {
+    setProgress(newProgress)
   }
-  const interval     = calcIntervalMinutes(previewSettings)
-  const totalMin     = getActiveMinutes(previewSettings)
-  const activeHours  = Math.floor(totalMin / 60)
-  const activeMins   = totalMin % 60
-  const drinksNeeded = Math.ceil(form.dailyGoalMl / form.amountPerDrinkMl)
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setLoading(true)
-    const user = getCurrentUser()
-    if (!user) { router.push('/login'); return }
-
-    const settings: WaterSettings = {
-      userId: user.id, ...form, intervalMinutes: interval,
-    }
-    saveSettings(settings)
-    const schedule = buildSchedule(settings)
-    await setupDailyNotifications(schedule)
-    setLoading(false)
-    router.push('/')
+  function handleLogout() {
+    logout()
+    router.push('/login')
   }
+
+  if (!ready) {
+    return (
+      <div style={{
+        minHeight: '100vh', display: 'flex',
+        alignItems: 'center', justifyContent: 'center',
+        background: '#0a0f2e',
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 48, animation: 'float 2s ease-in-out infinite' }}>💧</div>
+          <div style={{
+            marginTop: 16, fontSize: 12,
+            letterSpacing: '0.15em',
+            color: 'rgba(147,197,253,0.5)',
+            textTransform: 'uppercase',
+          }}>
+            Yükleniyor...
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const consumed      = progress?.totalConsumedMl ?? 0
+  const goal          = settings?.dailyGoalMl ?? 2000
+  const consumedCount = progress?.reminders.filter((r) => !r.skipped).length ?? 0
+  const percent       = Math.min(Math.round((consumed / goal) * 100), 100)
+
+  const mot =
+    percent >= 100 ? { icon: '🏆', text: 'Mükemmel! Bugün hedefe ulaştın!', color: '#4fd1c7' } :
+    percent >= 75  ? { icon: '🔥', text: 'Neredeyse bitti, son adım!',       color: '#63b3ed' } :
+    percent >= 50  ? { icon: '💪', text: 'Yarıyı geçtin, devam et!',         color: '#93c5fd' } :
+    percent >= 25  ? { icon: '🌊', text: 'İyi gidiyorsun, durmaa!',          color: '#7dd3fc' } :
+                     { icon: '✨', text: 'Güne su içerek başla!',            color: '#a5b4fc' }
 
   return (
-    <main className="bg-mesh min-h-screen px-4 py-10 relative overflow-hidden">
+    <main className="bg-mesh" style={{ minHeight: '100vh', paddingBottom: 40 }}>
+      <Toast />
 
-      {/* Orb'lar */}
-      <div className="orb w-96 h-96 bg-blue-600/15 -top-32 -right-32" />
-      <div className="orb w-72 h-72 bg-teal-500/10 bottom-0 -left-24" />
+      <div className="orb" style={{ width: 400, height: 400, background: 'radial-gradient(circle,rgba(37,99,235,0.2),transparent)', top: -100, left: -100 }} />
+      <div className="orb" style={{ width: 300, height: 300, background: 'radial-gradient(circle,rgba(13,148,136,0.15),transparent)', bottom: 100, right: -80 }} />
+      <div className="orb" style={{ width: 200, height: 200, background: 'radial-gradient(circle,rgba(99,102,241,0.1),transparent)', top: '40%', left: '60%' }} />
 
-      <div className={`max-w-lg mx-auto relative z-10 transition-all duration-700 ${
-        mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'
-      }`}>
-
-        {/* Başlık */}
-        <div className="text-center mb-8">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-teal-400 flex items-center justify-center mx-auto mb-4 animate-glow">
-            <span style={{ fontSize: 28 }}>⚙️</span>
+      <header style={{
+        position: 'sticky', top: 0, zIndex: 50,
+        background: 'rgba(10,15,46,0.85)',
+        backdropFilter: 'blur(20px)',
+        WebkitBackdropFilter: 'blur(20px)',
+        borderBottom: '1px solid rgba(99,179,237,0.12)',
+        padding: '14px 16px',
+      }}>
+        <div style={{ maxWidth: 520, margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{
+              width: 38, height: 38, borderRadius: '50%',
+              background: 'linear-gradient(135deg,#2563eb,#0d9488)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 16, fontWeight: 700, color: 'white',
+              boxShadow: '0 0 16px rgba(37,99,235,0.4)',
+              flexShrink: 0,
+            }}>
+              {user?.name?.charAt(0).toUpperCase()}
+            </div>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: 'white', lineHeight: 1.2 }}>
+                Merhaba,{' '}
+                <span style={{
+                  background: 'linear-gradient(90deg,#63b3ed,#4fd1c7)',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  backgroundClip: 'text',
+                }}>
+                  {user?.name?.split(' ')[0]}
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: 'rgba(147,197,253,0.5)', marginTop: 1 }}>
+                {new Date().toLocaleDateString('tr-TR', { weekday: 'long', day: 'numeric', month: 'long' })}
+              </div>
+            </div>
           </div>
-          <h1 className="text-2xl font-bold text-shimmer">
-            {saved ? 'Ayarlarını Güncelle' : 'Hedefini Belirle'}
-          </h1>
-          <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
-            Uyku düzenine göre hatırlatıcılar otomatik ayarlanır
-          </p>
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={() => router.push('/setup')}
+              style={{
+                fontSize: 11, fontWeight: 600, padding: '7px 12px', borderRadius: 10,
+                background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(99,179,237,0.2)',
+                color: 'rgba(147,197,253,0.8)', cursor: 'pointer',
+              }}
+            >⚙️ Ayarlar</button>
+            <button
+              onClick={handleLogout}
+              style={{
+                fontSize: 11, fontWeight: 600, padding: '7px 12px', borderRadius: 10,
+                background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)',
+                color: '#fca5a5', cursor: 'pointer',
+              }}
+            >Çıkış</button>
+          </div>
+        </div>
+      </header>
+
+      <div style={{
+        maxWidth: 520, margin: '0 auto', padding: '24px 16px',
+        display: 'flex', flexDirection: 'column', gap: 16,
+      }}>
+
+        {nextReminder && (
+          <div style={{
+            borderRadius: 20, padding: '16px 20px',
+            background: 'linear-gradient(135deg,rgba(37,99,235,0.25),rgba(13,148,136,0.2))',
+            border: '1px solid rgba(99,179,237,0.3)',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            boxShadow: '0 0 32px rgba(37,99,235,0.15)',
+            backdropFilter: 'blur(16px)',
+          }}>
+            <div>
+              <div style={{ fontSize: 10, color: 'rgba(147,197,253,0.6)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>
+                Sonraki Hatırlatıcı
+              </div>
+              <div style={{ fontSize: 22, fontWeight: 800, color: '#93c5fd' }}>
+                {new Date(nextReminder.scheduledAt).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}
+              </div>
+              <div style={{ fontSize: 11, color: 'rgba(147,197,253,0.5)', marginTop: 2 }}>
+                {nextReminder.title}
+              </div>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{
+                fontSize: 36, fontWeight: 900, lineHeight: 1,
+                background: 'linear-gradient(135deg,#63b3ed,#4fd1c7)',
+                WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text',
+              }}>
+                {minutesLeft}
+              </div>
+              <div style={{ fontSize: 11, color: 'rgba(147,197,253,0.5)', marginTop: 2 }}>dakika sonra</div>
+            </div>
+          </div>
+        )}
+
+        <WaterProgress consumed={consumed} goal={goal} />
+
+        <div className="glass" style={{ padding: '32px 20px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+          <div style={{ fontSize: 11, color: 'rgba(147,197,253,0.5)', letterSpacing: '0.08em', marginBottom: 8 }}>
+            Her içişte <span style={{ color: '#63b3ed', fontWeight: 700 }}>{settings?.amountPerDrinkMl}ml</span> sayılır
+          </div>
+          <DrinkButton onDrink={handleDrink} />
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-
-          {/* Günlük Su Hedefi */}
-          <div className="glass p-6">
-            <h2 className="text-sm font-semibold mb-4 flex items-center gap-2"
-              style={{ color: 'var(--text-secondary)' }}>
-              <span className="w-7 h-7 rounded-lg bg-blue-500/20 flex items-center justify-center text-base">💧</span>
-              Günlük Su Hedefi
-            </h2>
-
-            <div className="grid grid-cols-4 gap-2 mb-5">
-              {PRESET_GOALS.map((g) => (
-                <button
-                  key={g} type="button"
-                  onClick={() => setForm((p) => ({ ...p, dailyGoalMl: g }))}
-                  className="py-2.5 rounded-xl text-xs font-bold transition-all duration-200"
-                  style={
-                    form.dailyGoalMl === g
-                      ? {
-                          background: 'linear-gradient(135deg,#2563eb,#0d9488)',
-                          color: 'white',
-                          boxShadow: '0 0 16px rgba(37,99,235,0.4)',
-                        }
-                      : {
-                          background: 'rgba(255,255,255,0.05)',
-                          border: '1px solid var(--border-glow)',
-                          color: 'var(--text-muted)',
-                        }
-                  }
-                >
-                  {g}ml
-                </button>
-              ))}
-            </div>
-
-            <div className="flex items-center gap-4">
-              <input
-                type="range" min={500} max={4000} step={100}
-                value={form.dailyGoalMl}
-                onChange={(e) =>
-                  setForm((p) => ({ ...p, dailyGoalMl: Number(e.target.value) }))
-                }
-                className="flex-1"
-              />
-              <span className="text-lg font-black w-24 text-right text-shimmer">
-                {form.dailyGoalMl}ml
-              </span>
-            </div>
-          </div>
-
-          {/* Her İçişte Ne Kadar */}
-          <div className="glass p-6">
-            <h2 className="text-sm font-semibold mb-4 flex items-center gap-2"
-              style={{ color: 'var(--text-secondary)' }}>
-              <span className="w-7 h-7 rounded-lg bg-teal-500/20 flex items-center justify-center text-base">🥤</span>
-              Her İçişte Ne Kadar?
-            </h2>
-            <div className="grid grid-cols-4 gap-2">
-              {PRESET_AMOUNTS.map((a) => (
-                <button
-                  key={a} type="button"
-                  onClick={() => setForm((p) => ({ ...p, amountPerDrinkMl: a }))}
-                  className="py-2.5 rounded-xl text-xs font-bold transition-all duration-200"
-                  style={
-                    form.amountPerDrinkMl === a
-                      ? {
-                          background: 'linear-gradient(135deg,#0d9488,#06b6d4)',
-                          color: 'white',
-                          boxShadow: '0 0 16px rgba(13,148,136,0.4)',
-                        }
-                      : {
-                          background: 'rgba(255,255,255,0.05)',
-                          border: '1px solid var(--border-glow)',
-                          color: 'var(--text-muted)',
-                        }
-                  }
-                >
-                  {a}ml
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Uyku Düzeni */}
-          <div className="glass p-6">
-            <h2 className="text-sm font-semibold mb-4 flex items-center gap-2"
-              style={{ color: 'var(--text-secondary)' }}>
-              <span className="w-7 h-7 rounded-lg bg-indigo-500/20 flex items-center justify-center text-base">🌙</span>
-              Uyku Düzenin
-            </h2>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs mb-2" style={{ color: 'var(--text-muted)' }}>
-                  ☀️ Uyanma Saati
-                </label>
-                <input
-                  type="time"
-                  value={form.wakeTime}
-                  onChange={(e) => setForm((p) => ({ ...p, wakeTime: e.target.value }))}
-                  className="input-glass"
-                />
-              </div>
-              <div>
-                <label className="block text-xs mb-2" style={{ color: 'var(--text-muted)' }}>
-                  🌙 Uyku Saati
-                </label>
-                <input
-                  type="time"
-                  value={form.sleepTime}
-                  onChange={(e) => setForm((p) => ({ ...p, sleepTime: e.target.value }))}
-                  className="input-glass"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Canlı Önizleme */}
-          <div className="rounded-2xl p-6 relative overflow-hidden"
-            style={{
-              background: 'linear-gradient(135deg, rgba(37,99,235,0.3), rgba(13,148,136,0.3))',
-              border: '1px solid rgba(99,179,237,0.3)',
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>
+          {[
+            {
+              icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M8 12l2 2 4-4"/></svg>,
+              label: 'İçiş', value: consumedCount, unit: 'kez', color: '#63b3ed',
+            },
+            {
+              icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>,
+              label: 'Hedef', value: `%${percent}`, unit: '', color: percent >= 100 ? '#4fd1c7' : percent >= 50 ? '#63b3ed' : '#a5b4fc',
+            },
+            {
+              icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>,
+              label: 'Kalan', value: Math.max(goal - consumed, 0), unit: 'ml', color: '#4fd1c7',
+            },
+          ].map((stat) => (
+            <div key={stat.label} style={{
+              borderRadius: 18, padding: '16px 12px',
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid rgba(99,179,237,0.12)',
+              textAlign: 'center', backdropFilter: 'blur(12px)',
             }}>
-            {/* Parlama efekti */}
-            <div className="absolute inset-0 opacity-20"
-              style={{
-                background: 'radial-gradient(ellipse at 50% 0%, rgba(99,179,237,0.5), transparent 70%)',
-              }} />
+              <div style={{ color: stat.color, display: 'flex', justifyContent: 'center', marginBottom: 8 }}>{stat.icon}</div>
+              <div style={{ fontSize: 20, fontWeight: 900, color: stat.color, lineHeight: 1 }}>
+                {stat.value}
+                {stat.unit && <span style={{ fontSize: 11, fontWeight: 400, marginLeft: 2, color: 'rgba(147,197,253,0.5)' }}>{stat.unit}</span>}
+              </div>
+              <div style={{ fontSize: 10, color: 'rgba(147,197,253,0.4)', marginTop: 6, letterSpacing: '0.06em' }}>{stat.label}</div>
+            </div>
+          ))}
+        </div>
 
-            <h2 className="text-xs font-semibold mb-5 relative z-10"
-              style={{ color: 'var(--text-secondary)', letterSpacing: '0.08em' }}>
-              ✦ GÜNLÜK PROGRAM ÖZETİ
-            </h2>
-
-            <div className="grid grid-cols-3 gap-4 text-center relative z-10">
-              {[
-                { value: drinksNeeded, unit: 'içiş', label: 'Günde', icon: '🔄' },
-                { value: `${interval}dk`, unit: '', label: 'Aralık', icon: '⏱️' },
-                { value: `${activeHours}s ${activeMins}dk`, unit: '', label: 'Aktif Süre', icon: '⚡' },
-              ].map((s) => (
-                <div key={s.label} className="glass rounded-xl p-3">
-                  <div className="text-lg mb-1">{s.icon}</div>
-                  <div className="text-xl font-black text-white">{s.value}</div>
-                  <div className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>{s.label}</div>
-                </div>
-              ))}
+        <div style={{
+          borderRadius: 20, padding: '18px 20px',
+          background: 'rgba(255,255,255,0.03)',
+          border: '1px solid rgba(99,179,237,0.12)',
+          display: 'flex', alignItems: 'center', gap: 14,
+        }}>
+          <div style={{
+            width: 48, height: 48, borderRadius: 14, flexShrink: 0,
+            background: 'rgba(99,179,237,0.1)', border: '1px solid rgba(99,179,237,0.2)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24,
+          }}>
+            {mot.icon}
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: mot.color }}>{mot.text}</div>
+            <div style={{ fontSize: 11, color: 'rgba(147,197,253,0.4)', marginTop: 3 }}>
+              Bugün {consumedCount} kez su içtin ✦ {consumed}ml tamamlandı
             </div>
           </div>
+        </div>
 
-          {/* Kaydet Butonu */}
-          <button
-            type="submit"
-            disabled={loading}
-            className="btn-gradient w-full py-4 text-sm font-bold"
-          >
-            {loading ? (
-              <span className="flex items-center justify-center gap-2">
-                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full inline-block"
-                  style={{ animation: 'spin 0.8s linear infinite' }} />
-                Kuruluyor...
-              </span>
-            ) : saved
-              ? '✅ Güncelle & Bildirimleri Yeniden Kur'
-              : '🚀 Başlat & Bildirimleri Kur'}
-          </button>
-        </form>
+        <ReminderSchedule schedule={schedule} consumedCount={consumedCount} />
       </div>
-
-      <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
-      `}</style>
     </main>
   )
 }

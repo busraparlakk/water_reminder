@@ -1,219 +1,238 @@
-// app/page.tsx
+// app/setup/page.tsx
 'use client'
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import {
-  getCurrentUser,
-  getSettingsByUserId,
-  getTodayProgress,
-  getSavedNotifications,
-} from '@/lib/storage'
-import { restoreScheduledNotifications, showToast } from '@/lib/notifications'
-import { getNextReminder, minutesUntilNext } from '@/lib/scheduler'
-import { logout } from '@/lib/storage'
-import WaterProgress from '@/components/WaterProgress'
-import DrinkButton from '@/components/DrinkButton'
-import ReminderSchedule from '@/components/ReminderSchedule'
-import Toast from '@/components/Toast'
-import { DailyProgress, NotificationPayload, User, WaterSettings } from '@/types'
+import { getCurrentUser, getSettingsByUserId, saveSettings, saveNotifications } from '@/lib/storage'
+import { buildSchedule, calcIntervalMinutes } from '@/lib/scheduler'
+import type { WaterSettings } from '@/types'
 
-export default function Dashboard() {
+export default function SetupPage() {
   const router = useRouter()
+  const [mounted, setMounted] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [userId, setUserId] = useState<string | null>(null)
+  const [redirectTo, setRedirectTo] = useState<string | null>(null)
 
-  const [user, setUser] = useState<User | null>(null)
-  const [settings, setSettings] = useState<WaterSettings | null>(null)
-  const [progress, setProgress] = useState<DailyProgress | null>(null)
-  const [schedule, setSchedule] = useState<NotificationPayload[]>([])
-  const [nextReminder, setNextReminder] = useState<NotificationPayload | null>(null)
-  const [minutesLeft, setMinutesLeft] = useState<number>(0)
-  const [ready, setReady] = useState(false)
+  const [form, setForm] = useState({
+    dailyGoalMl: 2000,
+    wakeTime: '07:00',
+    sleepTime: '23:00',
+    amountPerDrinkMl: 250,
+  })
 
-  // ── İlk yükleme ────────────────────────────────────────────────────────────
   useEffect(() => {
     const u = getCurrentUser()
-    if (!u) { router.push('/login'); return }
+    if (!u) { setRedirectTo('/login'); return }
 
-    const s = getSettingsByUserId(u.id)
-    if (!s) { router.push('/setup'); return }
+    // Ayarlar zaten varsa dashboard'a git
+    const existing = getSettingsByUserId(u.id)
+    if (existing) { setRedirectTo('/'); return }
 
-    const p = getTodayProgress(u.id)
-    const saved = getSavedNotifications()
+    setUserId(u.id)
+    setMounted(true)
+  }, []) // eslint-disable-line
 
-    setUser(u)
-    setSettings(s)
-    setProgress(p)
-    setSchedule(saved)
-    setNextReminder(getNextReminder(saved))
-    setMinutesLeft(saved.length ? minutesUntilNext(getNextReminder(saved)!) : 0)
-
-    restoreScheduledNotifications()
-    setReady(true)
-  }, [router])
-
-  // ── Geri sayım (her dakika güncelle) ───────────────────────────────────────
   useEffect(() => {
-    if (!nextReminder) return
-    const tick = setInterval(() => {
-      setMinutesLeft(minutesUntilNext(nextReminder))
-    }, 60000)
-    return () => clearInterval(tick)
-  }, [nextReminder])
+    if (redirectTo) router.push(redirectTo)
+  }, [redirectTo]) // eslint-disable-line
 
-  // ── Su içilince progress güncelle ──────────────────────────────────────────
-  function handleDrink(newProgress: DailyProgress) {
-    setProgress(newProgress)
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const { name, value } = e.target
+    setForm((prev) => ({
+      ...prev,
+      [name]: name === 'wakeTime' || name === 'sleepTime' ? value : Number(value),
+    }))
   }
 
-  // ── Çıkış ──────────────────────────────────────────────────────────────────
-  function handleLogout() {
-    logout()
-    router.push('/login')
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!userId) return
+    setSaving(true)
+
+    const settings: WaterSettings = {
+      userId,
+      dailyGoalMl: form.dailyGoalMl,
+      wakeTime: form.wakeTime,
+      sleepTime: form.sleepTime,
+      amountPerDrinkMl: form.amountPerDrinkMl,
+      intervalMinutes: calcIntervalMinutes({
+        userId,
+        ...form,
+        intervalMinutes: 0,
+      }),
+    }
+
+    saveSettings(settings)
+    const schedule = buildSchedule(settings)
+    saveNotifications(schedule)
+
+    router.push('/')
   }
 
-  if (!ready) {
+  if (!mounted) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-sky-50 to-blue-50">
-        <div className="text-blue-400 text-4xl animate-bounce">💧</div>
+      <div style={{
+        minHeight: '100vh', display: 'flex',
+        alignItems: 'center', justifyContent: 'center',
+        background: '#0a0f2e',
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 48, animation: 'float 2s ease-in-out infinite' }}>💧</div>
+          <div style={{
+            marginTop: 16, fontSize: 12,
+            letterSpacing: '0.15em',
+            color: 'rgba(147,197,253,0.5)',
+            textTransform: 'uppercase',
+          }}>
+            Yükleniyor...
+          </div>
+        </div>
+        <style>{`@keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-10px)} }`}</style>
       </div>
     )
   }
 
-  const consumed = progress?.totalConsumedMl ?? 0
-  const goal = settings?.dailyGoalMl ?? 2000
-  const consumedCount = progress?.reminders.filter((r) => !r.skipped).length ?? 0
+  const drinksNeeded = Math.ceil(form.dailyGoalMl / form.amountPerDrinkMl)
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-sky-50 via-white to-blue-50">
-      <Toast />
+    <main className="bg-mesh" style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px 16px' }}>
 
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b border-slate-100 px-4 py-3">
-        <div className="max-w-lg mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-2xl">💧</span>
-            <div>
-              <div className="text-sm font-bold text-slate-800 leading-tight">
-                Merhaba, {user?.name?.split(' ')[0]}!
-              </div>
-              <div className="text-xs text-slate-400">
-                {new Date().toLocaleDateString('tr-TR', {
-                  weekday: 'long',
-                  day: 'numeric',
-                  month: 'long',
-                })}
-              </div>
-            </div>
+      <div className="orb" style={{ width: 400, height: 400, background: 'radial-gradient(circle,rgba(37,99,235,0.2),transparent)', top: -100, left: -100 }} />
+      <div className="orb" style={{ width: 300, height: 300, background: 'radial-gradient(circle,rgba(13,148,136,0.15),transparent)', bottom: 100, right: -80 }} />
+
+      <div style={{ width: '100%', maxWidth: 440 }}>
+
+        {/* Logo */}
+        <div style={{ textAlign: 'center', marginBottom: 32 }}>
+          <div style={{
+            width: 72, height: 72, borderRadius: '50%',
+            background: 'linear-gradient(135deg,#2563eb,#0d9488)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 32, margin: '0 auto 16px',
+            boxShadow: '0 0 32px rgba(37,99,235,0.4)',
+            animation: 'glow-pulse 2.5s ease-in-out infinite',
+          }}>
+            💧
           </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => router.push('/setup')}
-              className="text-xs px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 transition"
-            >
-              ⚙️ Ayarlar
-            </button>
-            <button
-              onClick={handleLogout}
-              className="text-xs px-3 py-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-500 transition"
-            >
-              Çıkış
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* ── İçerik ─────────────────────────────────────────────────────────── */}
-      <div className="max-w-lg mx-auto px-4 py-6 space-y-5">
-
-        {/* Sonraki hatırlatıcı banner */}
-        {nextReminder && (
-          <div className="bg-blue-600 text-white rounded-2xl px-5 py-4 flex items-center justify-between shadow-lg shadow-blue-200">
-            <div>
-              <div className="text-xs opacity-75 mb-0.5">Sonraki hatırlatıcı</div>
-              <div className="font-bold text-lg">
-                {new Date(nextReminder.scheduledAt).toLocaleTimeString('tr-TR', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}
-              </div>
-            </div>
-            <div className="text-right">
-              <div className="text-2xl font-black">{minutesLeft}dk</div>
-              <div className="text-xs opacity-75">sonra</div>
-            </div>
-          </div>
-        )}
-
-        {/* İlerleme */}
-        <WaterProgress consumed={consumed} goal={goal} />
-
-        {/* Su iç butonu */}
-        <div className="bg-white rounded-2xl shadow-sm shadow-blue-100 p-8 flex flex-col items-center gap-2">
-          <p className="text-sm text-slate-500 mb-2">
-            Her içişte{' '}
-            <span className="font-semibold text-blue-600">
-              {settings?.amountPerDrinkMl}ml
-            </span>{' '}
-            sayılır
+          <h1 className="text-shimmer" style={{ fontSize: 26, fontWeight: 800, margin: 0 }}>
+            Hedefini Belirle
+          </h1>
+          <p style={{ marginTop: 8, fontSize: 13, color: 'rgba(147,197,253,0.55)' }}>
+            Günlük su içme programını kişiselleştir
           </p>
-          <DrinkButton onDrink={handleDrink} />
         </div>
 
-        {/* Günlük istatistik */}
-        <div className="grid grid-cols-3 gap-3">
-          {[
-            {
-              label: 'İçiş',
-              value: consumedCount,
-              unit: 'kez',
-              color: 'text-blue-600',
-            },
-            {
-              label: 'Hedef',
-              value: `%${Math.min(Math.round((consumed / goal) * 100), 100)}`,
-              unit: '',
-              color: consumed >= goal ? 'text-green-600' : 'text-amber-500',
-            },
-            {
-              label: 'Kalan',
-              value: Math.max(goal - consumed, 0),
-              unit: 'ml',
-              color: 'text-slate-600',
-            },
-          ].map((stat) => (
-            <div
-              key={stat.label}
-              className="bg-white rounded-2xl shadow-sm shadow-blue-100 p-4 text-center"
-            >
-              <div className={`text-xl font-black ${stat.color}`}>
-                {stat.value}
-                <span className="text-xs font-normal ml-0.5">{stat.unit}</span>
+        {/* Form Kartı */}
+        <div className="glass-strong" style={{ padding: '32px 28px' }}>
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+
+            {/* Günlük Hedef */}
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <label style={{ fontSize: 13, fontWeight: 600, color: 'rgba(147,197,253,0.85)' }}>
+                  💧 Günlük Su Hedefi
+                </label>
+                <span style={{
+                  fontSize: 18, fontWeight: 800,
+                  background: 'linear-gradient(90deg,#63b3ed,#4fd1c7)',
+                  WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text',
+                }}>
+                  {form.dailyGoalMl} ml
+                </span>
               </div>
-              <div className="text-xs text-slate-400 mt-1">{stat.label}</div>
+              <input
+                type="range"
+                name="dailyGoalMl"
+                min={500} max={5000} step={250}
+                value={form.dailyGoalMl}
+                onChange={handleChange}
+                style={{ width: '100%' }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'rgba(147,197,253,0.35)', marginTop: 4 }}>
+                <span>500ml</span><span>5000ml</span>
+              </div>
             </div>
-          ))}
-        </div>
 
-        {/* Program listesi */}
-        <ReminderSchedule schedule={schedule} consumedCount={consumedCount} />
+            {/* Her İçişte */}
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <label style={{ fontSize: 13, fontWeight: 600, color: 'rgba(147,197,253,0.85)' }}>
+                  🥤 Her İçişte
+                </label>
+                <span style={{
+                  fontSize: 18, fontWeight: 800,
+                  background: 'linear-gradient(90deg,#63b3ed,#4fd1c7)',
+                  WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text',
+                }}>
+                  {form.amountPerDrinkMl} ml
+                </span>
+              </div>
+              <input
+                type="range"
+                name="amountPerDrinkMl"
+                min={100} max={500} step={50}
+                value={form.amountPerDrinkMl}
+                onChange={handleChange}
+                style={{ width: '100%' }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'rgba(147,197,253,0.35)', marginTop: 4 }}>
+                <span>100ml</span><span>500ml</span>
+              </div>
+            </div>
 
-        {/* Motivasyon kartı */}
-        <div className="bg-gradient-to-r from-blue-50 to-sky-50 border border-blue-100 rounded-2xl p-5 text-center">
-          <div className="text-2xl mb-1">
-            {consumed >= goal
-              ? '🏆'
-              : consumed >= goal * 0.5
-              ? '💪'
-              : '🌊'}
-          </div>
-          <p className="text-sm text-slate-600 font-medium">
-            {consumed >= goal
-              ? 'Mükemmel! Bugün hedefine ulaştın!'
-              : consumed >= goal * 0.5
-              ? 'Yarıyı geçtin, devam et!'
-              : 'Her damla önemli, başla!'}
-          </p>
+            {/* Saat Ayarları */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'rgba(147,197,253,0.85)', marginBottom: 8 }}>
+                  ☀️ Uyanma Saati
+                </label>
+                <input
+                  type="time"
+                  name="wakeTime"
+                  value={form.wakeTime}
+                  onChange={handleChange}
+                  className="input-glass"
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'rgba(147,197,253,0.85)', marginBottom: 8 }}>
+                  🌙 Uyku Saati
+                </label>
+                <input
+                  type="time"
+                  name="sleepTime"
+                  value={form.sleepTime}
+                  onChange={handleChange}
+                  className="input-glass"
+                />
+              </div>
+            </div>
+
+            {/* Özet */}
+            <div style={{
+              borderRadius: 14, padding: '14px 16px',
+              background: 'rgba(37,99,235,0.12)',
+              border: '1px solid rgba(99,179,237,0.2)',
+              fontSize: 13, color: 'rgba(147,197,253,0.7)',
+              lineHeight: 1.6,
+            }}>
+              Günde yaklaşık{' '}
+              <span style={{ color: '#63b3ed', fontWeight: 700 }}>{drinksNeeded} kez</span>{' '}
+              su içmen hatırlatılacak.
+            </div>
+
+            {/* Kaydet */}
+            <button
+              type="submit"
+              disabled={saving}
+              className="btn-gradient"
+              style={{ padding: '16px', fontSize: 15, fontWeight: 700, borderRadius: 14, marginTop: 4 }}
+            >
+              {saving ? '⏳ Kaydediliyor...' : '🚀 Başla!'}
+            </button>
+
+          </form>
         </div>
       </div>
     </main>
